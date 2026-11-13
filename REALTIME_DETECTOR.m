@@ -3,338 +3,363 @@ clc;
 clear;
 close all;
 
-%% =========================================================
-%       DSP-BASED EMERGENCY SOUND DETECTOR
-%                  LIVE MICROPHONE
-% ==========================================================
+%% LOAD TRAINED MODEL
+load('trainedModel.mat');
 
-%% 1. LOAD TRAINED SVM MODEL
+%% SETTINGS
+Fs = 16000;
+chunkDuration = 2;
+chunkSize = Fs * chunkDuration;
 
-modelFile = 'trainedModel.mat';
+historySize = 5;
+requiredVotes = 3;
 
-if ~isfile(modelFile)
-    error(['trainedModel.mat not found. Run SVM.m first ' ...
-           'to train and save the classifier.']);
-end
+% IMPORTANT: Change these names to match your actual classNames.
+disp('Available sound classes:');
+disp(classNames);
 
-loadedData = load(modelFile);
+emergencyClasses = ["Siren", "Glass", "BabyCry"];
 
-requiredVariables = {'SVMModel','mu','sigma'};
+%% MICROPHONE
+recObj = audiorecorder(Fs, 16, 1);
 
-for k = 1:length(requiredVariables)
-    if ~isfield(loadedData, requiredVariables{k})
-        error('Missing variable %s in trainedModel.mat.', ...
-              requiredVariables{k});
+%% GUI WINDOW
+fig = uifigure('Name', 'Emergency Sound Detection', ...
+    'Position', [300 150 650 480]);
+
+fig.Color = [0.95 0.97 0.99];
+
+% Title
+titleLabel = uilabel(fig, ...
+    'Text', 'EMERGENCY SOUND DETECTION SYSTEM', ...
+    'Position', [40 420 570 35], ...
+    'FontSize', 21, ...
+    'FontWeight', 'bold', ...
+    'HorizontalAlignment', 'center');
+
+% Status
+statusLabel = uilabel(fig, ...
+    'Text', 'Status: Ready', ...
+    'Position', [40 375 570 28], ...
+    'FontSize', 15, ...
+    'HorizontalAlignment', 'center');
+
+% Prediction heading
+uilabel(fig, ...
+    'Text', 'DETECTION RESULT', ...
+    'Position', [40 315 570 30], ...
+    'FontSize', 15, ...
+    'FontWeight', 'bold', ...
+    'HorizontalAlignment', 'center');
+
+% Prediction display
+resultLabel = uilabel(fig, ...
+    'Text', 'Waiting for audio...', ...
+    'Position', [40 265 570 45], ...
+    'FontSize', 22, ...
+    'FontWeight', 'bold', ...
+    'HorizontalAlignment', 'center');
+
+% Voting information
+voteLabel = uilabel(fig, ...
+    'Text', 'Emergency votes: 0/5', ...
+    'Position', [40 225 570 25], ...
+    'FontSize', 14, ...
+    'HorizontalAlignment', 'center');
+
+% Prediction history
+historyLabel = uitextarea(fig, ...
+    'Position', [90 105 470 100], ...
+    'Editable', 'off', ...
+    'Value', {'Prediction history will appear here.'});
+
+% Start button
+startButton = uibutton(fig, 'push', ...
+    'Text', 'START DETECTION', ...
+    'Position', [100 40 190 45], ...
+    'FontSize', 15, ...
+    'FontWeight', 'bold', ...
+    'BackgroundColor', [0.15 0.65 0.35], ...
+    'FontColor', [1 1 1], ...
+    'ButtonPushedFcn', @startDetection);
+
+% Stop button
+stopButton = uibutton(fig, 'push', ...
+    'Text', 'STOP DETECTION', ...
+    'Position', [360 40 190 45], ...
+    'FontSize', 15, ...
+    'FontWeight', 'bold', ...
+    'BackgroundColor', [0.8 0.2 0.2], ...
+    'FontColor', [1 1 1], ...
+    'Enable', 'off', ...
+    'ButtonPushedFcn', @stopDetection);
+
+%% TIMER
+detectionTimer = timer( ...
+    'ExecutionMode', 'fixedSpacing', ...
+    'Period', 0.15, ...
+    'BusyMode', 'drop', ...
+    'TimerFcn', @processAudio);
+
+%% VARIABLES
+predictionHistory = strings(0,1);
+nextSample = 1;
+isRunning = false;
+
+%% START DETECTION
+function startDetection(~,~)
+
+    if isRunning
+        return;
     end
+
+    try
+        % Reset variables
+        predictionHistory = strings(0,1);
+        nextSample = 1;
+
+        resultLabel.Text = 'Listening...';
+        resultLabel.FontColor = [0.1 0.3 0.7];
+
+        voteLabel.Text = 'Emergency votes: 0/5';
+        historyLabel.Value = {'Listening for sounds...'};
+
+        statusLabel.Text = 'Status: Microphone ON';
+
+        % Start asynchronous recording
+        record(recObj);
+
+        isRunning = true;
+
+        startButton.Enable = 'off';
+        stopButton.Enable = 'on';
+
+        start(detectionTimer);
+
+    catch ME
+
+        statusLabel.Text = ['Error: ' ME.message];
+        stopDetection([],[]);
+
+    end
+
 end
 
-SVMModel = loadedData.SVMModel;
-mu = loadedData.mu;
-sigma = loadedData.sigma;
+%% STOP DETECTION
+function stopDetection(~,~)
 
-sigma(sigma == 0) = 1;
+    if isvalid(detectionTimer) && strcmp(detectionTimer.Running,'on')
+        stop(detectionTimer);
+    end
 
-fprintf('\n============================================\n');
-fprintf('       DSP EMERGENCY SOUND DETECTOR\n');
-fprintf('============================================\n');
-fprintf('Trained model loaded successfully.\n');
+    if isrecording(recObj)
+        stop(recObj);
+    end
 
-%% 2. MICROPHONE SETTINGS
+    isRunning = false;
 
-Fs = 16000;              % Sampling frequency
-bits = 16;               % Recording resolution
-channels = 1;            % Mono recording
+    if isvalid(fig)
+        statusLabel.Text = 'Status: Stopped';
+        startButton.Enable = 'on';
+        stopButton.Enable = 'off';
+    end
 
-chunkDuration = 2;       % Record 2 seconds each time
-numberOfVotes = 5;       % Majority voting over 5 chunks
-minimumEmergencyVotes = 3;
+end
 
-% Emergency classes
-emergencyClasses = ["Siren","Glass","BabyCry"];
+%% PROCESS AUDIO
+function processAudio(~,~)
 
-% Store recent predictions
-predictionHistory = strings(numberOfVotes,1);
-historyCount = 0;
-historyIndex = 1;
+    if ~isRunning
+        return;
+    end
 
-%% 3. CREATE DISPLAY FIGURE
+    try
 
-fig = figure( ...
-    'Name','Live Emergency Sound Detector', ...
-    'NumberTitle','off', ...
-    'Color','w', ...
-    'Position',[300 200 800 450]);
+        audioData = getaudiodata(recObj,'double');
 
-statusText = uicontrol(fig, ...
-    'Style','text', ...
-    'String','MICROPHONE READY', ...
-    'FontSize',18, ...
-    'FontWeight','bold', ...
-    'ForegroundColor',[0 0.3 0.7], ...
-    'BackgroundColor','w', ...
-    'Position',[100 350 600 45]);
-
-classText = uicontrol(fig, ...
-    'Style','text', ...
-    'String','Waiting for sound...', ...
-    'FontSize',15, ...
-    'BackgroundColor','w', ...
-    'Position',[100 290 600 40]);
-
-ax = axes('Parent',fig, ...
-    'Position',[0.12 0.12 0.78 0.40]);
-
-title(ax,'Live Microphone Signal');
-xlabel(ax,'Time (seconds)');
-ylabel(ax,'Amplitude');
-grid(ax,'on');
-
-%% 4. START LIVE DETECTION
-
-disp(' ');
-disp('Microphone detection started.');
-disp('Close the display window or press Ctrl+C to stop.');
-disp(' ');
-
-try
-
-    while ishandle(fig)
-
-        %% RECORD AUDIO
-
-        recorder = audiorecorder(Fs,bits,channels);
-
-        fprintf('\nListening for %.1f seconds...\n', ...
-                chunkDuration);
-
-        recordblocking(recorder,chunkDuration);
-
-        audio = getaudiodata(recorder,'double');
-
-        if isempty(audio)
-            continue;
+        % Wait until a complete 2-second chunk is available
+        if length(audioData) < nextSample + chunkSize - 1
+            return;
         end
 
-        %% DISPLAY WAVEFORM
+        % Extract next audio chunk
+        x = audioData(nextSample:nextSample+chunkSize-1);
 
-        timeAxis = (0:length(audio)-1)/Fs;
+        nextSample = nextSample + chunkSize;
 
-        if ishandle(ax)
-            plot(ax,timeAxis,audio);
-            title(ax,'Recorded Microphone Signal');
-            xlabel(ax,'Time (seconds)');
-            ylabel(ax,'Amplitude');
-            grid(ax,'on');
-            drawnow limitrate;
+        % Check audio level
+        if max(abs(x)) < 1e-6
+            resultLabel.Text = 'No significant sound';
+            return;
         end
 
-        %% PROCESS AND CLASSIFY
+        %% FEATURE EXTRACTION
 
-        predictedClass = classifySound( ...
-            audio,Fs,SVMModel,mu,sigma);
+        featureVector = extractLiveFeatures(x,Fs);
 
-        fprintf('Predicted sound: %s\n', ...
-                char(predictedClass));
+        %% NORMALIZATION
 
-        %% UPDATE PREDICTION HISTORY
+        featureVectorNorm = ...
+            (featureVector - mu) ./ (sigma + eps);
 
-        predictionHistory(historyIndex) = predictedClass;
+        %% SVM PREDICTION
 
-        historyIndex = historyIndex + 1;
+        predictedLabel = predict(SVMModel,featureVectorNorm);
 
-        if historyIndex > numberOfVotes
-            historyIndex = 1;
+        predictedClass = string(predictedLabel);
+
+        %% UPDATE HISTORY
+
+        predictionHistory(end+1,1) = predictedClass;
+
+        if numel(predictionHistory) > historySize
+            predictionHistory(1) = [];
         end
-
-        historyCount = min(historyCount+1,numberOfVotes);
-
-        %% MAJORITY VOTING
-
-        recentPredictions = predictionHistory(1:historyCount);
 
         emergencyVotes = sum( ...
-            ismember(lower(recentPredictions), ...
-                     lower(emergencyClasses)));
+            ismember(predictionHistory,emergencyClasses));
 
-        fprintf('Emergency votes: %d/%d\n', ...
-                emergencyVotes,historyCount);
+        %% DISPLAY PREDICTION
 
-        %% EMERGENCY / NORMAL DECISION
+        resultLabel.Text = char(predictedClass);
 
-        if emergencyVotes >= minimumEmergencyVotes
+        voteLabel.Text = sprintf( ...
+            'Emergency votes: %d/%d', ...
+            emergencyVotes,historySize);
 
-            statusMessage = 'EMERGENCY SOUND DETECTED!';
-            classMessage = ['Detected: ' char(predictedClass)];
+        historyLabel.Value = cellstr( ...
+            "Latest: " + predictionHistory);
 
-            set(statusText, ...
-                'String',statusMessage, ...
-                'ForegroundColor',[0.85 0 0]);
+        %% FINAL DECISION
 
-            set(classText, ...
-                'String',classMessage);
+        if emergencyVotes >= requiredVotes
 
-            fprintf('\n*** EMERGENCY SOUND DETECTED! ***\n');
+            resultLabel.Text = ...
+                ['EMERGENCY: ' char(predictedClass)];
+
+            resultLabel.FontColor = [0.85 0.05 0.05];
 
         else
 
-            set(statusText, ...
-                'String','NORMAL / NO CONFIRMED EMERGENCY', ...
-                'ForegroundColor',[0 0.5 0]);
+            resultLabel.Text = ...
+                ['Detected: ' char(predictedClass)];
 
-            set(classText, ...
-                'String',['Latest sound: ' char(predictedClass)]);
-
-            fprintf('Status: No confirmed emergency.\n');
+            resultLabel.FontColor = [0.1 0.4 0.7];
 
         end
 
-        drawnow;
+        drawnow limitrate;
+
+    catch ME
+
+        statusLabel.Text = ['Detection error: ' ME.message];
+        stopDetection([],[]);
 
     end
-
-catch ME
-
-    fprintf('\nDetection stopped or an error occurred:\n');
-    fprintf('%s\n',ME.message);
 
 end
 
-disp('Live microphone detection stopped.');
+%% CLEANUP WHEN WINDOW CLOSES
+fig.CloseRequestFcn = @closeGUI;
 
-%% =========================================================
-%              LOCAL FUNCTION 1
-%              AUDIO CLASSIFICATION
-% ==========================================================
+function closeGUI(~,~)
 
-function predictedClass = classifySound(audio,Fs, ...
-                                        SVMModel,mu,sigma)
+    stopDetection([],[]);
 
-    %% PREPROCESSING
-
-    x = audio(:);
-
-    % Convert to mono if necessary
-    if size(x,2) > 1
-        x = mean(x,2);
+    if isvalid(detectionTimer)
+        delete(detectionTimer);
     end
 
-    % Resample to 16 kHz
-    targetFs = 16000;
+    delete(fig);
 
-    if Fs ~= targetFs
-        x = resample(x,targetFs,Fs);
-        Fs = targetFs;
-    end
+end
 
-    % Remove DC offset
+end
+
+%% =========================================
+% LIVE FEATURE EXTRACTION
+% =========================================
+
+function featureVector = extractLiveFeatures(x,Fs)
+
+    x = x(:);
+
+    % Remove DC component
     x = x - mean(x);
 
-    % Normalize
+    % Normalize amplitude
     x = x/(max(abs(x))+eps);
 
-    % Butterworth band-pass filter
+    % Bandpass filter
     [b,a] = butter(4,[100 7500]/(Fs/2),'bandpass');
 
     x = filtfilt(b,a,x);
 
-    %% FRAMING
+    % Frame settings
+    frameLength = 400;
+    hopLength = 200;
+    NFFT = 1024;
 
-    frameDuration = 0.025;
-    frameLength = round(frameDuration*Fs);
-
-    hopLength = round(frameLength*0.5);
-
-    if length(x) < frameLength
-        error('Audio chunk is too short for framing.');
-    end
+    win = hamming(frameLength);
 
     numFrames = floor((length(x)-frameLength)/hopLength)+1;
 
-    %% FEATURE ARRAYS
+    frameFeatures = zeros(numFrames,5);
 
-    energy = zeros(numFrames,1);
-    zcr = zeros(numFrames,1);
-    centroid = zeros(numFrames,1);
-    bandwidth = zeros(numFrames,1);
-    rolloff = zeros(numFrames,1);
+    for k = 1:numFrames
 
-    window = hamming(frameLength);
-    NFFT = 1024;
+        idx = (k-1)*hopLength+1;
 
-    frequencies = (0:NFFT/2)'*Fs/NFFT;
+        frame = x(idx:idx+frameLength-1);
 
-    %% FRAME-BY-FRAME FEATURE EXTRACTION
+        % 1. Energy
+        energy = mean(frame.^2);
 
-    for i = 1:numFrames
+        % 2. Zero crossing rate
+        zcr = sum(abs(diff(sign(frame))))/ ...
+              (2*(length(frame)-1));
 
-        startIndex = (i-1)*hopLength+1;
-        endIndex = startIndex+frameLength-1;
+        % FFT
+        Y = fft(frame.*win,NFFT);
 
-        frame = x(startIndex:endIndex);
+        spectrum = abs(Y(1:NFFT/2+1));
 
-        % Hamming window
-        windowedFrame = frame.*window;
+        powerSpectrum = spectrum.^2;
 
-        % Feature 1: Short-time energy
-        energy(i) = mean(frame.^2);
+        frequencies = (0:NFFT/2)'*Fs/NFFT;
 
-        % Feature 2: Zero crossing rate
-        zcr(i) = sum(abs(diff(sign(frame)))) ...
-                 /(2*length(frame));
+        % 3. Spectral centroid
+        centroid = sum(frequencies.*spectrum)/ ...
+                   (sum(spectrum)+eps);
 
-        % FFT magnitude
-        spectrum = abs(fft(windowedFrame,NFFT));
+        % 4. Spectral bandwidth
+        bandwidth = sqrt(sum( ...
+            ((frequencies-centroid).^2).*spectrum)/ ...
+            (sum(spectrum)+eps));
 
-        % Positive frequency spectrum
-        spectrum = spectrum(1:NFFT/2+1);
-
-        spectrumSum = sum(spectrum)+eps;
-
-        % Feature 3: Spectral centroid
-        centroid(i) = sum(frequencies.*spectrum) ...
-                      /spectrumSum;
-
-        % Feature 4: Spectral bandwidth
-        bandwidth(i) = sqrt( ...
-            sum(((frequencies-centroid(i)).^2).*spectrum) ...
-            /spectrumSum);
-
-        % Feature 5: Spectral rolloff (85%)
-        cumulativeSpectrum = cumsum(spectrum);
-
-        threshold = 0.85*cumulativeSpectrum(end);
+        % 5. Spectral rolloff
+        cumulativePower = cumsum(powerSpectrum);
 
         rolloffIndex = find( ...
-            cumulativeSpectrum >= threshold,1);
+            cumulativePower >= 0.85*sum(powerSpectrum), ...
+            1,'first');
 
         if isempty(rolloffIndex)
-            rolloff(i) = 0;
+            rolloff = 0;
         else
-            rolloff(i) = frequencies(rolloffIndex);
+            rolloff = frequencies(rolloffIndex);
         end
+
+        frameFeatures(k,:) = ...
+            [energy,zcr,centroid,bandwidth,rolloff];
 
     end
 
-    %% RECORDING-LEVEL FEATURE VECTOR
+    % Mean and standard deviation
+    featureMean = mean(frameFeatures,1);
 
-    % IMPORTANT:
-    % Feature ordering must match BUILD_DATASET.m.
+    featureStd = std(frameFeatures,0,1);
 
-    featureVector = [ ...
-        mean(energy),std(energy), ...
-        mean(zcr),std(zcr), ...
-        mean(centroid),std(centroid), ...
-        mean(bandwidth),std(bandwidth), ...
-        mean(rolloff),std(rolloff)];
-
-    %% FEATURE NORMALIZATION
-
-    featureVector = (featureVector-mu)./sigma;
-
-    %% SVM PREDICTION
-
-    predictedClass = predict(SVMModel,featureVector);
-
-    predictedClass = string(predictedClass);
+    featureVector = [featureMean,featureStd];
 
 end

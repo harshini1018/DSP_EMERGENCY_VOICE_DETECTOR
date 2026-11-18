@@ -454,14 +454,12 @@ The project also demonstrates a real-time microphone-based classification interf
 
 ---
 
-## Authors
-
 **DSP Course Project Team**
 
 - Siri Chandana
 - Amulya
 - Harshini
-- Savita
+- Savita 
 
 **Course:** Digital Signal Processing  
 **Software Platform:** MATLAB  

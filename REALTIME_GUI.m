@@ -2,18 +2,17 @@
 function REALTIME_GUI
 
 clc;
+close all;
 
 %% ==========================================
-% LOAD TRAINED MODEL
-%% ==========================================
+% 1. LOAD TRAINED MODEL
+% ==========================================
 
-modelFile = 'trainedModel.mat';
-
-if ~isfile(modelFile)
-    error('trainedModel.mat not found. Run SVM.m first.');
+if ~isfile('trainedModel.mat')
+    error('Run SVM.m first. trainedModel.mat not found.');
 end
 
-data = load(modelFile);
+data = load('trainedModel.mat');
 
 SVMModel = data.SVMModel;
 mu = data.mu;
@@ -21,86 +20,108 @@ sigma = data.sigma;
 
 sigma(sigma == 0) = 1;
 
+fprintf('Trained SVM loaded successfully.\n');
+
 %% ==========================================
-% SETTINGS
-%% ==========================================
+% 2. SETTINGS
+% ==========================================
 
 Fs = 16000;
 bits = 16;
 channels = 1;
 
 chunkDuration = 2;
+
 numberOfVotes = 5;
 minimumEmergencyVotes = 3;
 
-emergencyClasses = ["Siren","Glass","BabyCry"];
+emergencyClasses = ["Siren","Glass"];
 
 predictionHistory = strings(numberOfVotes,1);
+
 historyCount = 0;
 historyIndex = 1;
 
 recorder = [];
+pollTimer = [];
+
 isRunning = false;
-isBusy = false;
+chunkClock = [];
 
 %% ==========================================
-% CREATE GUI
-%% ==========================================
+% 3. CREATE GUI
+% ==========================================
 
 fig = figure( ...
     'Name','DSP Emergency Sound Detector', ...
     'NumberTitle','off', ...
     'Color',[0.94 0.96 0.98], ...
-    'Position',[250 120 950 650], ...
+    'Position',[200 100 1000 700], ...
     'MenuBar','none', ...
+    'Resize','off', ...
     'CloseRequestFcn',@closeGUI);
 
-% Main heading
+%% TITLE
+
 uicontrol(fig, ...
     'Style','text', ...
     'String','DSP-BASED EMERGENCY SOUND DETECTOR', ...
-    'FontSize',20, ...
+    'FontSize',21, ...
     'FontWeight','bold', ...
     'ForegroundColor',[0.1 0.2 0.4], ...
     'BackgroundColor',[0.94 0.96 0.98], ...
-    'Position',[100 580 750 40]);
+    'Position',[100 630 800 45]);
 
-% Status
+uicontrol(fig, ...
+    'Style','text', ...
+    'String','REAL-TIME AUDIO CLASSIFICATION USING SVM', ...
+    'FontSize',12, ...
+    'BackgroundColor',[0.94 0.96 0.98], ...
+    'Position',[200 600 600 25]);
+
+%% STATUS
+
 statusText = uicontrol(fig, ...
     'Style','text', ...
     'String','SYSTEM READY', ...
-    'FontSize',20, ...
+    'FontSize',22, ...
     'FontWeight','bold', ...
-    'ForegroundColor',[0 0.3 0.7], ...
+    'ForegroundColor',[0 0.35 0.7], ...
     'BackgroundColor','w', ...
-    'Position',[180 490 590 65]);
+    'Position',[150 510 700 65]);
 
-% Predicted class
+%% PREDICTED CLASS
+
 classText = uicontrol(fig, ...
     'Style','text', ...
     'String','Predicted Sound: Waiting...', ...
-    'FontSize',16, ...
+    'FontSize',17, ...
+    'FontWeight','bold', ...
     'BackgroundColor',[0.94 0.96 0.98], ...
-    'Position',[200 440 550 35]);
+    'Position',[200 465 600 35]);
 
-% Emergency votes
+%% EMERGENCY VOTES
+
 voteText = uicontrol(fig, ...
     'Style','text', ...
     'String','Emergency Votes: 0/0', ...
-    'FontSize',14, ...
+    'FontSize',15, ...
     'BackgroundColor',[0.94 0.96 0.98], ...
-    'Position',[200 405 550 30]);
+    'Position',[200 430 600 30]);
 
-% Axes
+%% WAVEFORM
+
 ax = axes('Parent',fig, ...
-    'Position',[0.12 0.40 0.78 0.25]);
+    'Position',[0.12 0.42 0.78 0.22]);
 
-title(ax,'Live Microphone Waveform');
+title(ax,'Live Microphone Signal');
 xlabel(ax,'Time (seconds)');
 ylabel(ax,'Amplitude');
 grid(ax,'on');
+ylim(ax,[-1 1]);
 
-% Start button
+%% START BUTTON
+
 startButton = uicontrol(fig, ...
     'Style','pushbutton', ...
     'String','START DETECTION', ...
@@ -108,10 +129,11 @@ startButton = uicontrol(fig, ...
     'FontWeight','bold', ...
     'ForegroundColor','w', ...
     'BackgroundColor',[0.1 0.55 0.25], ...
-    'Position',[220 320 220 55], ...
+    'Position',[220 340 220 60], ...
     'Callback',@startDetection);
 
-% Stop button
+%% STOP BUTTON
+
 stopButton = uicontrol(fig, ...
     'Style','pushbutton', ...
     'String','STOP DETECTION', ...
@@ -119,37 +141,47 @@ stopButton = uicontrol(fig, ...
     'FontWeight','bold', ...
     'ForegroundColor','w', ...
     'BackgroundColor',[0.8 0.15 0.15], ...
-    'Position',[500 320 220 55], ...
+    'Position',[550 340 220 60], ...
     'Enable','off', ...
     'Callback',@stopDetection);
 
-% Prediction history
-historyLabel = uicontrol(fig, ...
+%% HISTORY TITLE
+
+uicontrol(fig, ...
     'Style','text', ...
-    'String','RECENT PREDICTIONS', ...
+    'String','RECENT SOUND PREDICTIONS', ...
     'FontSize',14, ...
     'FontWeight','bold', ...
     'BackgroundColor',[0.94 0.96 0.98], ...
-    'Position',[200 265 550 30]);
+    'Position',[200 285 600 30]);
+
+%% HISTORY BOX
 
 historyBox = uicontrol(fig, ...
     'Style','listbox', ...
     'String',{'No predictions yet'}, ...
     'FontSize',12, ...
-    'Position',[200 105 550 155]);
+    'Position',[250 125 500 155]);
 
-% Footer
+%% FOOTER
+
 uicontrol(fig, ...
     'Style','text', ...
-    'String','Emergency Classes: Siren | Glass | BabyCry', ...
-    'FontSize',11, ...
-    'ForegroundColor',[0.4 0.4 0.4], ...
+    'String','Emergency: Siren | Glass', ...
+    'FontSize',12, ...
     'BackgroundColor',[0.94 0.96 0.98], ...
-    'Position',[200 55 550 25]);
+    'Position',[200 70 600 30]);
+
+uicontrol(fig, ...
+    'Style','text', ...
+    'String','Normal: Speech | Noise', ...
+    'FontSize',12, ...
+    'BackgroundColor',[0.94 0.96 0.98], ...
+    'Position',[200 40 600 25]);
 
 %% ==========================================
-% START DETECTION CALLBACK
-%% ==========================================
+% 4. START DETECTION
+% ==========================================
 
 function startDetection(~,~)
 
@@ -158,89 +190,123 @@ function startDetection(~,~)
     end
 
     try
+
         recorder = audiorecorder(Fs,bits,channels);
+
+        isRunning = true;
+
+        predictionHistory(:) = "";
+        historyCount = 0;
+        historyIndex = 1;
+
+        set(statusText,'String','LISTENING...', ...
+            'ForegroundColor',[0 0.35 0.7]);
+
+        set(classText,'String','Predicted Sound: Waiting...');
+        set(voteText,'String','Emergency Votes: 0/0');
+        set(historyBox,'String',{'No predictions yet'});
+
+        set(startButton,'Enable','off');
+        set(stopButton,'Enable','on');
+
+        startNewChunk();
+
+        pollTimer = timer( ...
+            'ExecutionMode','fixedSpacing', ...
+            'Period',0.1, ...
+            'BusyMode','drop', ...
+            'TimerFcn',@checkRecording);
+
+        start(pollTimer);
+
+        fprintf('\nLive detection started.\n');
+
     catch ME
+
+        stopDetection([],[]);
         errordlg(ME.message,'Microphone Error');
-        return;
+
     end
-
-    isRunning = true;
-    isBusy = false;
-
-    predictionHistory(:) = "";
-    historyCount = 0;
-    historyIndex = 1;
-
-    set(statusText,'String','LISTENING...', ...
-        'ForegroundColor',[0 0.3 0.7]);
-
-    set(classText,'String','Predicted Sound: Waiting...');
-
-    set(voteText,'String','Emergency Votes: 0/0');
-
-    set(startButton,'Enable','off');
-    set(stopButton,'Enable','on');
-
-    record(recorder);
-
-    fprintf('\nLive detection started.\n');
-
-    processNextChunk();
 
 end
 
 %% ==========================================
-% PROCESS AUDIO CHUNK
-%% ==========================================
+% 5. START A FRESH RECORDING CHUNK
+% ==========================================
 
-function processNextChunk()
+function startNewChunk()
 
-    if ~isRunning || ~ishandle(fig) || isBusy
+    if ~isRunning
         return;
     end
 
-    isBusy = true;
+    recorder = audiorecorder(Fs,bits,channels);
+
+    record(recorder);
+
+    chunkClock = tic;
+
+end
+
+%% ==========================================
+% 6. CHECK RECORDING AND PROCESS CHUNK
+% ==========================================
+
+function checkRecording(~,~)
+
+    if ~isRunning || ~ishandle(fig)
+        return;
+    end
+
+    if toc(chunkClock) < chunkDuration
+        return;
+    end
 
     try
 
-        % Wait for the next audio chunk
-        pause(chunkDuration);
+        %% STOP CURRENT RECORDING
 
-        if ~isRunning || ~ishandle(fig)
-            isBusy = false;
-            return;
-        end
+        stop(recorder);
 
         audio = getaudiodata(recorder,'double');
 
         if isempty(audio)
-            isBusy = false;
-            processNextChunk();
+            startNewChunk();
             return;
         end
 
-        % Keep only the latest 2 seconds
-        requiredSamples = Fs*chunkDuration;
+        %% MICROPHONE LEVEL CHECK
 
-        if length(audio) > requiredSamples
-            audio = audio(end-requiredSamples+1:end);
-        end
+        rmsValue = sqrt(mean(audio.^2));
 
-        if length(audio) < requiredSamples
-            isBusy = false;
-            processNextChunk();
+        fprintf('\nMicrophone RMS: %.6f\n',rmsValue);
+
+        if rmsValue < 0.0001
+
+            set(statusText,'String','LOW MICROPHONE SIGNAL', ...
+                'ForegroundColor',[0.8 0.3 0]);
+
+            set(classText,'String','Check microphone input.');
+
+            startNewChunk();
             return;
+
         end
 
-        %% DISPLAY WAVEFORM
+        %% WAVEFORM DISPLAY
 
         timeAxis = (0:length(audio)-1)/Fs;
 
         plot(ax,timeAxis,audio);
 
-        title(ax,'Live Microphone Waveform');
+        title(ax,'Live Microphone Signal');
+        xlabel(ax,'Time (seconds)');
+        ylabel(ax,'Amplitude');
 
-        drawnow;
+        grid(ax,'on');
+        ylim(ax,[-1 1]);
+
+        drawnow limitrate;
 
         %% CLASSIFY AUDIO
 
@@ -253,7 +319,7 @@ function processNextChunk()
 
         predictionHistory(historyIndex) = predictedClass;
 
-        historyIndex = historyIndex + 1;
+        historyIndex = historyIndex+1;
 
         if historyIndex > numberOfVotes
             historyIndex = 1;
@@ -263,6 +329,8 @@ function processNextChunk()
 
         recentPredictions = predictionHistory(1:historyCount);
 
+        %% EMERGENCY VOTING
+
         emergencyVotes = sum( ...
             ismember(lower(recentPredictions), ...
             lower(emergencyClasses)));
@@ -271,7 +339,7 @@ function processNextChunk()
             sprintf('Emergency Votes: %d/%d', ...
             emergencyVotes,historyCount));
 
-        %% EMERGENCY DECISION
+        %% DISPLAY STATUS
 
         if emergencyVotes >= minimumEmergencyVotes
 
@@ -290,15 +358,19 @@ function processNextChunk()
         set(classText,'String', ...
             ['Predicted Sound: ' char(predictedClass)]);
 
-        %% UPDATE HISTORY LIST
+        %% UPDATE HISTORY BOX
 
-        historyEntries = cell(historyCount,1);
+        entries = cell(historyCount,1);
 
         for j = 1:historyCount
-            historyEntries{j} = char(recentPredictions(j));
+            entries{j} = char(recentPredictions(j));
         end
 
-        set(historyBox,'String',historyEntries);
+        set(historyBox,'String',entries);
+
+        %% START NEXT CHUNK
+
+        startNewChunk();
 
     catch ME
 
@@ -308,88 +380,124 @@ function processNextChunk()
 
         errordlg(ME.message,'Detection Error');
 
-        return;
-
-    end
-
-    isBusy = false;
-
-    if isRunning && ishandle(fig)
-        processNextChunk();
     end
 
 end
 
 %% ==========================================
-% STOP DETECTION CALLBACK
-%% ==========================================
+% 7. STOP DETECTION
+% ==========================================
 
 function stopDetection(~,~)
 
     isRunning = false;
 
+    if ~isempty(pollTimer) && isvalid(pollTimer)
+
+        stop(pollTimer);
+        delete(pollTimer);
+
+        pollTimer = [];
+
+    end
+
     if ~isempty(recorder)
+
         try
             stop(recorder);
         catch
         end
+
+        recorder = [];
+
     end
 
-    set(statusText,'String','DETECTION STOPPED', ...
-        'ForegroundColor',[0.4 0.4 0.4]);
+    if ishandle(statusText)
 
-    set(startButton,'Enable','on');
-    set(stopButton,'Enable','off');
+        set(statusText,'String','DETECTION STOPPED', ...
+            'ForegroundColor',[0.4 0.4 0.4]);
+
+        set(startButton,'Enable','on');
+        set(stopButton,'Enable','off');
+
+    end
 
     fprintf('\nDetection stopped.\n');
 
 end
 
 %% ==========================================
-% CLOSE GUI
-%% ==========================================
+% 8. CLOSE GUI
+% ==========================================
 
 function closeGUI(~,~)
 
-    isRunning = false;
+    stopDetection([],[]);
 
-    if ~isempty(recorder)
-        try
-            stop(recorder);
-        catch
-        end
+    if ishandle(fig)
+        delete(fig);
     end
-
-    delete(fig);
 
 end
 
 end
 
 %% =========================================================
-% AUDIO FEATURE EXTRACTION AND CLASSIFICATION
+% 9. AUDIO PREPROCESSING AND FEATURE EXTRACTION
+%    MATCHES BUILD_DATASET.m
 %% =========================================================
 
 function predictedClass = classifySound(audio,Fs, ...
-                                        SVMModel,mu,sigma)
+    SVMModel,mu,sigma)
 
-    x = audio(:);
+    %% LOAD AUDIO
 
-    % Remove DC offset
-    x = x-mean(x);
+    x = audio;
 
-    % Normalize
-    x = x/(max(abs(x))+eps);
+    %% CONVERT TO MONO
 
-    % Bandpass filter
-    [b,a] = butter(4,[100 7500]/(Fs/2),'bandpass');
+    if size(x,2) > 1
+        x = mean(x,2);
+    end
+
+    x = x(:);
+
+    %% REMOVE DC OFFSET
+
+    x = x - mean(x);
+
+    %% RESAMPLE TO 16 kHz
+
+    targetFs = 16000;
+
+    if Fs ~= targetFs
+        x = resample(x,targetFs,Fs);
+        Fs = targetFs;
+    end
+
+    %% NORMALIZATION
+
+    maxValue = max(abs(x));
+
+    if maxValue > 0
+        x = x/maxValue;
+    end
+
+    %% BUTTERWORTH BAND-PASS FILTER
+
+    lowCut = 100;
+    highCut = 7500;
+
+    [b,a] = butter(4, ...
+        [lowCut highCut]/(Fs/2), ...
+        'bandpass');
 
     x = filtfilt(b,a,x);
 
-    %% FRAMING
+    %% FRAME PARAMETERS
 
     frameLength = round(0.025*Fs);
-    hopLength = round(frameLength*0.5);
+    hopLength = round(0.0125*Fs);
 
     if length(x) < frameLength
         error('Audio chunk too short.');
@@ -398,32 +506,46 @@ function predictedClass = classifySound(audio,Fs, ...
     numFrames = floor( ...
         (length(x)-frameLength)/hopLength)+1;
 
+    %% FEATURE ARRAYS
+
     energy = zeros(numFrames,1);
     zcr = zeros(numFrames,1);
     centroid = zeros(numFrames,1);
     bandwidth = zeros(numFrames,1);
     rolloff = zeros(numFrames,1);
 
-    window = hamming(frameLength);
+    %% FFT SETTINGS
 
     NFFT = 1024;
 
-    frequencies = (0:NFFT/2)'*Fs/NFFT;
+    window = hamming(frameLength);
 
-    %% FEATURE EXTRACTION
+    frequencies = ...
+        (0:NFFT/2)'*Fs/NFFT;
+
+    %% FRAME-BY-FRAME FEATURE EXTRACTION
 
     for i = 1:numFrames
 
         startIndex = (i-1)*hopLength+1;
+        endIndex = startIndex+frameLength-1;
 
-        frame = x(startIndex:startIndex+frameLength-1);
+        frame = x(startIndex:endIndex);
+
+        %% HAMMING WINDOW
 
         windowedFrame = frame.*window;
 
+        %% FEATURE 1: ENERGY
+
         energy(i) = mean(frame.^2);
+
+        %% FEATURE 2: ZERO CROSSING RATE
 
         zcr(i) = sum(abs(diff(sign(frame)))) ...
             /(2*length(frame));
+
+        %% FFT
 
         spectrum = abs(fft(windowedFrame,NFFT));
 
@@ -431,12 +553,18 @@ function predictedClass = classifySound(audio,Fs, ...
 
         spectrumSum = sum(spectrum)+eps;
 
-        centroid(i) = sum(frequencies.*spectrum) ...
-            /spectrumSum;
+        %% FEATURE 3: SPECTRAL CENTROID
+
+        centroid(i) = ...
+            sum(frequencies.*spectrum)/spectrumSum;
+
+        %% FEATURE 4: SPECTRAL BANDWIDTH
 
         bandwidth(i) = sqrt( ...
             sum(((frequencies-centroid(i)).^2).*spectrum) ...
             /spectrumSum);
+
+        %% FEATURE 5: SPECTRAL ROLLOFF
 
         cumulativeSpectrum = cumsum(spectrum);
 
@@ -445,24 +573,38 @@ function predictedClass = classifySound(audio,Fs, ...
         rolloffIndex = find( ...
             cumulativeSpectrum >= threshold,1);
 
-        rolloff(i) = frequencies(rolloffIndex);
+        if isempty(rolloffIndex)
+            rolloff(i) = 0;
+        else
+            rolloff(i) = frequencies(rolloffIndex);
+        end
 
     end
 
-    %% RECORDING LEVEL FEATURES
+    %% RECORDING-LEVEL FEATURES
 
     featureVector = [ ...
-        mean(energy),std(energy), ...
-        mean(zcr),std(zcr), ...
-        mean(centroid),std(centroid), ...
-        mean(bandwidth),std(bandwidth), ...
-        mean(rolloff),std(rolloff)];
+        mean(energy), ...
+        std(energy), ...
+        mean(zcr), ...
+        std(zcr), ...
+        mean(centroid), ...
+        std(centroid), ...
+        mean(bandwidth), ...
+        std(bandwidth), ...
+        mean(rolloff), ...
+        std(rolloff)];
 
-    %% NORMALIZATION
+    %% NORMALIZATION USING TRAINING PARAMETERS
 
     featureVector = (featureVector-mu)./sigma;
 
-    %% PREDICTION
+    %% DEBUG: DISPLAY FEATURE VECTOR
+
+    fprintf('\nExtracted feature vector:\n');
+    disp(featureVector);
+
+    %% SVM PREDICTION
 
     predictedClass = predict(SVMModel,featureVector);
 

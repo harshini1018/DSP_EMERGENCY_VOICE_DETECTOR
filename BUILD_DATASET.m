@@ -1,3 +1,4 @@
+
 clc;
 clear;
 close all;
@@ -21,6 +22,7 @@ close all;
 %
 % Classes:
 % Siren
+
 % Glass
 % BabyCry
 % Speech
@@ -41,12 +43,13 @@ fprintf('============================================\n');
 
 targetFs = 16000;
 
+
 datasetFolder = 'Dataset';
 
 classes = {
     'Siren'
     'Glass'
-    'BabyCry'
+   
     'Speech'
     'Noise'
 };

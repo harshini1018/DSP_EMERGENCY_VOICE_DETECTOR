@@ -274,7 +274,6 @@ function closeGUI(~,~)
 
 end
 
-end
 
 %% =========================================
 % LIVE FEATURE EXTRACTION
